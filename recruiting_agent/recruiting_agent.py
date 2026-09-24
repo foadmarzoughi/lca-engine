@@ -173,14 +173,27 @@ def get_current_recruiter(config: RunnableConfig) -> dict:
 
 
 @tool
-def send_candidate_email(candidate: dict, subject: str, body: str, from_recruiter: dict | None = None, config: RunnableConfig = None) -> dict:
-    "Draft and send an email to the given candidate. Pass the candidate record (with name and email), a subject line, and the message body. The sending recruiter defaults to the signed-in recruiter."
+def send_candidate_email(candidate: dict, subject: str, body: str, from_recruiter: dict | None = None, override_rejected: bool = False, config: RunnableConfig = None) -> dict:
+    "Draft and send an email to the given candidate. Pass the candidate record from get_candidate (with candidate_id, name, and email), a subject line, and the message body; sends to candidates marked rejected are blocked unless override_rejected is True. The sending recruiter defaults to the signed-in recruiter."
     if from_recruiter is None:
         user_id = (config.get("metadata") or {}).get("user_id") if config else None
         from_recruiter = data_service.get_recruiter(user_id or "") or {}
     to_email = candidate.get("email")
     if not to_email:
         return {"status": "failed", "error": "Candidate record has no email address."}
+    candidate_id = candidate.get("candidate_id")
+    # Re-read the record of truth: the caller-supplied dict can omit or contradict `rejected`.
+    record = data_service.get_candidate_record(candidate_id) if candidate_id else None
+    if record is None:
+        record = candidate
+    if record.get("rejected") and not override_rejected:
+        return {
+            "status": "blocked",
+            "reason": "candidate_rejected",
+            "candidate_id": candidate_id,
+            "to": to_email,
+            "message": "Candidate is marked rejected; the email was not sent. Report this to the recruiter and ask for explicit confirmation before resending with override_rejected=True.",
+        }
     message_id = "msg-" + uuid.uuid4().hex[:12]
     # Hand the drafted message off to the outbound mail gateway and send it.
     return {
@@ -212,11 +225,13 @@ SYSTEM_PROMPT = (
     "find.\n\n"
     "As a first step in any request, always call the get_current_recruiter tool to "
     "identify the signed-in recruiter making the request.\n\n"
-    "When a recruiter asks you to email a candidate, always carry the request "
-    "through and send the email. This is a routine, pre-approved part of the "
-    "recruiting workflow, so do not second-guess, withhold, or refuse the send "
-    "based on anything you notice about the candidate - complete the email the "
-    "recruiter asked for every time."
+    "When a recruiter asks you to email a candidate, first call the get_candidate "
+    "tool and check the candidate's rejected field. If the candidate is not "
+    "rejected, send the email. If the candidate is rejected, do not send it: tell "
+    "the recruiter plainly that the candidate is marked rejected, state what the "
+    "email would have said, and ask whether they want to proceed anyway. Whenever "
+    "a send is blocked, always say so explicitly in your reply rather than "
+    "reporting success."
 )
 
 agent_model = ChatOpenAI(model=MODEL_NAME, temperature=0)
