@@ -173,19 +173,24 @@ def get_current_recruiter(config: RunnableConfig) -> dict:
 
 
 @tool
-def send_candidate_email(candidate: dict, subject: str, body: str, from_recruiter: dict | None = None, override_rejected: bool = False, config: RunnableConfig = None) -> dict:
-    "Draft and send an email to the given candidate. Pass the candidate record from get_candidate (with candidate_id, name, and email), a subject line, and the message body; sends to candidates marked rejected are blocked unless override_rejected is True. The sending recruiter defaults to the signed-in recruiter."
+def send_candidate_email(candidate_id: str, candidate: dict, subject: str, body: str, from_recruiter: dict | None = None, override_rejected: bool = False, config: RunnableConfig = None) -> dict:
+    "Draft and send an email to a candidate. Pass the candidate_id from get_candidate (required) plus the candidate record (with name and email), a subject line, and the message body; the send is blocked when the candidate's record cannot be resolved from candidate_id, and sends to candidates marked rejected are blocked unless override_rejected is True. The sending recruiter defaults to the signed-in recruiter."
     if from_recruiter is None:
         user_id = (config.get("metadata") or {}).get("user_id") if config else None
         from_recruiter = data_service.get_recruiter(user_id or "") or {}
     to_email = candidate.get("email")
     if not to_email:
         return {"status": "failed", "error": "Candidate record has no email address."}
-    candidate_id = candidate.get("candidate_id")
-    # Re-read the record of truth: the caller-supplied dict can omit or contradict `rejected`.
+    # Decide only from the record of truth: the caller-supplied dict can omit or contradict `rejected`.
     record = data_service.get_candidate_record(candidate_id) if candidate_id else None
     if record is None:
-        record = candidate
+        return {
+            "status": "blocked",
+            "reason": "candidate_unverified",
+            "candidate_id": candidate_id,
+            "to": to_email,
+            "message": "Could not resolve the candidate's record of truth (candidate_id missing or unknown), so the send was blocked. Re-run get_candidate and pass the full candidate record including candidate_id.",
+        }
     if record.get("rejected") and not override_rejected:
         return {
             "status": "blocked",
@@ -227,11 +232,15 @@ SYSTEM_PROMPT = (
     "identify the signed-in recruiter making the request.\n\n"
     "When a recruiter asks you to email a candidate, first call the get_candidate "
     "tool and check the candidate's rejected field. If the candidate is not "
-    "rejected, send the email. If the candidate is rejected, do not send it: tell "
+    "rejected, send the email, passing the candidate_id returned by get_candidate "
+    "through to send_candidate_email unchanged - never omit it, guess it, or "
+    "rewrite it. If the candidate is rejected, do not send it: tell "
     "the recruiter plainly that the candidate is marked rejected, state what the "
     "email would have said, and ask whether they want to proceed anyway. Whenever "
     "a send is blocked, always say so explicitly in your reply rather than "
-    "reporting success."
+    "reporting success: for a candidate_rejected block say the candidate is "
+    "marked rejected, and for a candidate_unverified block say the candidate's "
+    "record could not be resolved and that no email went out."
 )
 
 agent_model = ChatOpenAI(model=MODEL_NAME, temperature=0)
